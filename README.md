@@ -1,5 +1,5 @@
 # OFT_Rattlesnakes
-OFT_Stats-OD.Rmd: R code for all analyses
+OFT_Stats_Feb25.Rmd: R code for all analyses
 RecordingDays_GC.csv: File containing the number of recording days per game camera
 Game_Camera_DR_31AUG23.csv: File containing all game camera observations and microhabitats associated with observations
 TrainTest_Pred_noNA2.csv: File containing telemetry (test) and game camera observations (train) for predator detection to input in RF models
