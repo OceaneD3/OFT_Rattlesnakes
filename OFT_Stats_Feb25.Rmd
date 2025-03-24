@@ -1,0 +1,1021 @@
+---
+title: "OFT_OD_27SEP24"
+author: "Oceane Da Cunha"
+date: "2024-09-27"
+output: html_document
+---
+
+```{r}
+#Loading the packages
+library(dplyr)
+library(ggplot2)
+library(randomForest)
+library(caret)
+library(tibble)
+library(party)
+library(sp)
+library(rgdal)
+library(adehabitatHR)
+library(scales)
+library(tidyr)
+library(lme4)
+library(lmerTest)
+library(BSDA)
+library(RColorBrewer)
+library(wesanderson)
+library(insight)
+library(parameters)
+library(Hmisc)
+library(corrplot)
+library(vegan)
+library(overlap)
+library(lubridate)
+library(circular)
+library(ggpubr)
+library(car)
+library(glmmTMB)
+library(DHARMa)
+library(performance)
+library(sjPlot)
+library(multcomp)
+library(ggeffects)
+library(betareg)
+library(fitdistrplus)
+library(emmeans)
+```
+
+```{r}
+#Loading the data with number of days to test if recording time between tank and desert is different
+Days <- read.csv("RecordingDays_GC.csv")
+#Checking the normality of the data before statistical test
+shapiro.test(Days$Days)
+#The data is normal so we can use a t-test
+t.test(Days$Days~Days$Location, alternative = "two.sided")
+#There is no significant difference between desert and tank
+```
+
+```{r}
+#Loading the game camera data
+Data <- read.csv("Game_Camera_DR_31AUG23.csv")
+```
+
+```{r}
+#Description of the observations
+
+#Number of species in total during the study
+Species <- Data %>% count(Scientific_name)
+write.csv(Species,"C:/Users/ocean/OneDrive - University of Texas at El Paso/Desktop/El Paso PhD/C_atrox_PROJECT/Experiment/Game camera/Data_31AUG23/Species.csv")
+
+#Number of prey, predator, other and breakdown associated
+Preycount <- subset(Data, Predator_Prey_Other == "Prey")
+Preycount %>% count(Scientific_name)
+Preycount %>% count(Detection)
+Predcount <- subset(Data, Predator_Prey_Other == "Predator")
+Predcount %>% count(Month)
+Predcount %>% count(Scientific_name)
+Predcount %>% count(Detection)
+Predcount %>% count(Predation_Y_N)
+Othercount <- subset(Data, Predator_Prey_Other == "Other")
+Othercount %>% count(Scientific_name)
+Othercount %>% count(Detection)
+
+##########################################################################################################
+#Detection
+DetectionT <- Data %>% count(Scientific_name, Detection)
+DetectionY <- subset(DetectionT, Detection == "Y")
+write.csv(DetectionY,"C:/Users/ocean/OneDrive - University of Texas at El Paso/Desktop/El Paso PhD/C_atrox_PROJECT/Experiment/Game camera/Data_31AUG23/DetectionY.csv")
+
+DY <- read.csv("DetectionY.csv")
+Plot_Detection <- ggplot(data = DY, aes(x = reorder(Scientific_name, -n), y = n)) +
+                  geom_bar(stat="identity") +
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+Plot_Detection
+
+###########################################################################################################
+#Predation
+PredT <- Data %>% count(Scientific_name, Predation_Y_N)
+PredY <- subset(PredT, Predation_Y_N == "Y")
+
+Plot_Pred <- ggplot(data = PredY, aes(x = reorder(Scientific_name, -n), y = n)) +
+                  geom_bar(stat="identity") +
+                  theme(axis.text.x = element_text(angle = 90, vjust = 0.5, hjust=1))
+Plot_Pred
+
+```
+
+```{r}
+#Observation per location of prey, predator, and others
+Location <- Data %>% count(Camera_Number, Predator_Prey_Other, Location2)
+
+#Test if there is significantly more animals in tank than in desert
+shapiro.test(Location$n)
+#Not normal so need to do a Wilcoxon test instead of t-test
+
+#Predator
+PL <- subset(Location, Predator_Prey_Other == "Predator")
+wilcox.test(PL$n ~ PL$Location2, alternative = "two.sided")
+tapply(PL$n, PL$Location2, mean)
+
+#Prey
+PrL <- subset(Location, Predator_Prey_Other == "Prey")
+wilcox.test(PrL$n ~ PrL$Location2, alternative = "two.sided")
+tapply(PrL$n, PrL$Location2, mean)
+
+#Other
+Ot <- subset(Location, Predator_Prey_Other == "Other")
+wilcox.test(Ot$n ~ Ot$Location2, alternative = "two.sided")
+tapply(Ot$n, Ot$Location2, mean)
+```
+
+```{r}
+#Breakdown between model sizes
+
+#Detection
+Size <- Data %>% count(Camera_Number, Model_size, Detection)
+#Keeping only yes
+SizeY <- subset(Size, Detection =="Y")
+shapiro.test(SizeY$n)
+#Data is not normal
+wilcox.test(SizeY$n ~ SizeY$Model_size, alternative = "two.sided")
+tapply(SizeY$n, SizeY$Model_size, mean)
+#Significant difference between model size in detection with big model detected more than small
+
+df_detection_count <- SizeY %>%
+  group_by(Model_size) %>%
+  summarise(detection_count = sum(n))
+
+#Predation
+SizePred <- Data %>% count(Camera_Number, Model_size, Predation_Y_N)
+#Keeping only yes
+SizePredY <- subset(SizePred, Predation_Y_N =="Y")
+shapiro.test(SizePredY$n)
+wilcox.test(SizePredY$n ~ SizePredY$Model_size, alternative = "two.sided")
+tapply(SizePredY$n, SizePredY$Model_size, mean)
+
+df_detection_count2 <- SizePredY %>%
+  group_by(Model_size) %>%
+  summarise(detection_count = sum(n))
+
+```
+
+```{r}
+#Random forest models to investigate what influences predator detection
+
+Data %>% count(Detection, Predator_Prey_Other)
+#There is a more lot observations of no detection than detection by predators. Need to put weight on the yes by subsetting our dataset (505 No and 196 Yes)
+
+#Subsetting of predator
+DataPred <- subset(Data, Predator_Prey_Other =="Predator")
+#Subset of only detection 
+SubDetPred <- DataPred[ which(DataPred$Detection=='Y'), ]
+
+#Subset of random non detection
+RandomSubPred <- DataPred[sample(1:nrow(DataPred), "200",
+                     replace=FALSE,DataPred$Detection=='N'),]
+
+#Putting the dataframe together
+SubDataPred <- data.frame(rbind(RandomSubPred, SubDetPred))
+
+#Create a random column to verify Gini index
+DataPred_random <- data.frame(SubDataPred %>% 
+                   mutate(random = sample(100, size = nrow(SubDataPred), replace = TRUE)))
+
+#Converting everything in factor and numeric for na.roughfix
+DataRF_Pred1 <- mutate_if(DataPred_random, is.character, as.factor)
+DataRF_Pred2 <- mutate_if(DataRF_Pred1, is.integer, as.numeric)
+str(DataRF_Pred2) 
+
+#Checking the best parameters for our random forest
+train(Detection ~ TimeS + Month + Rock_per + Soil_per + Vegetation_per + Model_size + 
+               Location2  + Soil_type + DNR + DNV + Concealment + Vegetation_height + random, 
+               data = DataRF_Pred2, method = "rf", na.action = na.omit)
+#The best model is set with a mtry of 2
+
+#Doing the random forest model
+
+RFPred <- randomForest(Detection ~ TimeS + Month + Rock_per + Soil_per + Vegetation_per + Model_size + 
+               Location2 + Rock_type + Soil_type + DNR + DNV + Concealment + Vegetation_height + random, 
+               data = DataRF_Pred2, importance = TRUE, na.action=na.roughfix, mtry = 2, type = 1)
+RFPred
+
+#Plot of mean decrease accuracy: Fig2A
+pdf(file="RFPred.pdf")
+varImpPlot(RFPred)
+dev.off()
+```
+
+```{r}
+##Using random forest of factors influencing predator detection applied to snake data
+
+#Start from DataRF_Pred2, merged snake and model data together. NA were removed as DNR_NA = 100m and Veg_height NA = 0cm. When 0% soil, soil type is defaulted to Gravel-allu.
+
+#Loading the merged dataset
+Merg1 <- read.csv("TrainTest_Pred_noNA2.csv")
+
+#Subsetting the train dataset to create a trained RF
+Train1 <- subset(Merg1, Set == "Train")
+
+#Converting everything in factor and numeric for na.roughfix
+Train1a <- mutate_if(Train1, is.character, as.factor)
+Train1b <- mutate_if(Train1a, is.integer, as.numeric)
+str(Train1b)
+
+#Create a random column to verify Gini index
+Train1b <- data.frame(Train1b %>% 
+                   mutate(random = sample(100, size = nrow(Train1b), replace = TRUE)))
+
+##Checking the best parameters for our random forest
+train(Detection ~ TimeS + Month + Rock_per + Soil_per + Vegetation_per + 
+                  Soil_type + DNR + DNV + Concealment + Vegetation_height, 
+                  data = Train1b, method = "rf", na.action = na.omit)
+#The best model is set with a mtry of 2. Remove the random column as we know it is good.
+
+#Doing the random forest model
+RFtrain1 <- randomForest(Detection ~ TimeS + Month + Rock_per + Soil_per + Vegetation_per +  
+                        Soil_type + DNR + DNV + Concealment + Vegetation_height, 
+                        data = Train1b, importance = TRUE, na.action=na.roughfix, mtry = 2, type = 1)
+RFtrain1
+importance(RFtrain1, type=1)
+
+#Plot of mean decrease accuracy 
+pdf(file="RFTrain1.pdf")
+varImpPlot(RFtrain1)
+dev.off()
+
+#Predicting if snake would get detected or not
+Snake <- Merg1
+
+#Converting everything in factor and numeric for na.roughfix
+Snake1a <- mutate_if(Snake, is.character, as.factor)
+Snake1b <- mutate_if(Snake1a, is.integer, as.numeric)
+str(Snake1b)
+str(Train1b)
+
+#Predicting with probabilities
+Predic1 <- predict(RFtrain1, Snake1b, type = "prob")
+Predic1
+Predic1 <- as.data.frame(Predic1)
+
+#Merging the predictions together
+PredicDF1 <- data.frame(cbind(Snake1b, Predic1))
+PredicSnakePred <- subset(PredicDF1, Set =="Test" )
+
+#Saving the dataframe with predictions
+write.csv(PredicSnakePred,"C:/Users/ocean/OneDrive - University of Texas at El Paso/Desktop/El Paso PhD/C_atrox_PROJECT/Experiment/Game camera/Data_31AUG23/PredicSnakePred.csv")
+```
+
+```{r}
+#Looking at the predictions for the predator detection random forest model
+
+PredicSnakePred <- read.csv("PredicSnakePred.csv")
+
+#Isolating predictions for snakes
+PS <- as.data.frame(dplyr::select(PredicSnakePred, Y, N))
+#Putting the data frame in wide format
+PSw <- gather(PS, detection, probability, Y:N,  factor_key=TRUE)
+
+#Analysis to see difference between groups
+shapiro.test(PSw$probability)
+wilcox.test(PSw$probability ~ PSw$detection, alternative = "two.sided", paired = TRUE)
+tapply(PSw$probability, PSw$detection, mean)
+#The probability for no detection is significantly higher than for detection for snakes.
+```
+
+
+```{r}
+# Investigate the main factors of detection events: Using GLMM with beta family distribution and 
+# a logit link
+PredicSnakePred$TimeS <- as.factor(PredicSnakePred$TimeS)
+
+GlmBeta <- glmmTMB(Y ~  Vegetation_height + Vegetation_per + DNR + DNV + TimeS + Concealment + Month 
+                    + Soil_type + (1|ID),
+                    family = beta_family(),
+                    data = PredicSnakePred)
+summary(GlmBeta)
+
+#Model selection: Remove soil type makes model better 
+step(GlmBeta , direction = "backward")
+
+GlmBeta_b <- glmmTMB(Y ~  Vegetation_height + Vegetation_per + DNR + DNV + TimeS + Concealment + Month 
+                     + (1|ID),
+                    family = beta_family(),
+                    data = PredicSnakePred)
+summary(GlmBeta_b)
+
+
+#Check Residual Diagnostics with DHARMa
+
+# Simulate residuals
+sim_res <- simulateResiduals(fittedModel = GlmBeta_b)
+plot(sim_res)
+
+#Check overdipsersion
+testDispersion(sim_res)
+#Dispersion is fine (p = 0.656)
+
+#Check for Zero-One Inflation
+testZeroInflation(sim_res)
+#No problem (p over 0.05)
+
+#Check multicollinearity
+check_collinearity(GlmBeta_b)
+#No problem (VIF less than 5). Other MH percentage were removed because directly correlated to each other (%soil and %rock)
+
+#Using sjPlot to visualize results
+tab_model(GlmBeta_b, show.re.var = TRUE)
+
+###############Post-hoc comparisons######################################################
+
+#For concealment
+emmeans(GlmBeta_b, pairwise ~ Concealment, adjust = "tukey")
+cld(emmeans(GlmBeta_b, ~ Concealment), Letters = letters)
+
+#For month
+emmeans(GlmBeta_b, pairwise ~ Month, adjust = "tukey")
+cld(emmeans(GlmBeta_b, ~ Month), Letters = letters)
+
+#For time: does not have a significant effect even if high importance in RF 
+emmeans(GlmBeta_b, pairwise ~ TimeS, adjust = "tukey")
+cld(emmeans(GlmBeta_b, ~ TimeS), Letters = letters)
+plot(ggpredict(GlmBeta_b, terms = "TimeS"))
+
+ggplot(PredicSnakePred, aes(x= TimeS, y = Y)) +
+  geom_line(lwd=1) +
+  theme_classic()
+
+##########################Figures#############################################################
+
+#For vegetation percentage: Follow a binomial distribution with logit link
+ggplot(PredicSnakePred,aes(Vegetation_per, Y)) +
+  geom_point(alpha = 0.3, color = "bisque4") +
+  geom_smooth(method = "glm", method.args = list(family = binomial(link = "logit")), se = TRUE) +
+          theme(legend.position="none",  plot.title = element_blank(),axis.title.x = element_blank()) +
+          theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+          theme(text = element_text(size = 15)) 
+
+ggsave("VegPerBin.pdf")
+
+#For vegetation height: Follow a binomial distribution with logit link
+ggplot(PredicSnakePred,aes(Vegetation_height, Y)) +
+  geom_point(alpha = 0.3, color = "bisque4") +
+  geom_smooth(method = "glm", method.args = list(family = binomial(link = "logit")), se = TRUE) +
+          theme(legend.position="none",  plot.title = element_blank(),axis.title.x = element_blank()) +
+          theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+          theme(text = element_text(size = 15)) 
+ggsave("VegHeightBin.pdf")
+
+
+
+
+```
+
+
+```{r}
+#Random forest to see what influence prey distribution in relation to the model: I looked at the notes of each observation to make sure they were within the range of the model (Usable yes or no)
+
+Prey <- read.csv("PreyUsable.csv")
+
+Prey%>% count(Usable)
+#There is 596 observations within range and 1759 that are not. Need to subset to have an equal number
+
+#Subsetting of prey
+DataPrey <- subset(Prey, Usable =="Y")
+#Subset of only usable
+
+#Subset of random non usable
+RandomSubPrey <- Prey[sample(1:nrow(Prey), "600",
+                     replace=FALSE,Prey$Usable=='N'),]
+
+#Putting the dataframe together
+SubDataPrey <- data.frame(rbind(RandomSubPrey, DataPrey))
+
+#Create a random column to verify Gini index
+DataPrey_random <- data.frame(SubDataPrey %>% 
+                   mutate(random = sample(100, size = nrow(SubDataPrey), replace = TRUE)))
+
+#Converting everything in factor and numeric for na.roughfix
+DataRF_Prey1 <- mutate_if(DataPrey_random, is.character, as.factor)
+DataRF_Prey2 <- mutate_if(DataRF_Prey1, is.integer, as.numeric)
+write.csv(DataRF_Prey2,"C:/Users/ocean/OneDrive - University of Texas at El Paso/Desktop/El Paso PhD/C_atrox_PROJECT/Experiment/Game camera/Data_31AUG23/DataRFPreyR2.csv")
+
+#Checking the best parameters for our random forest
+train(Usable ~ TimeS + Month + Soil_per + Vegetation_per  +  Soil_type + DNR + DNV + Concealment +              Vegetation_height, 
+      data = DataRF_Prey2, method = "rf", na.action = na.omit)
+#The best model is set with a mtry of 12 but 2 used because valid range
+
+#Doing the random forest model
+
+RFPrey <- randomForest(Usable ~ TimeS + Month + Soil_per + Vegetation_per  +  Soil_type + DNR +                          DNV + Concealment + Vegetation_height, 
+               data = DataRF_Prey2, importance = TRUE, na.action=na.roughfix, mtry = 2, type = 1)
+RFPrey
+#The OOB estimate is of 34%
+
+#Plot of mean decrease accuracy: FigX
+pdf(file="RFPrey3.pdf")
+varImpPlot(RFPrey)
+dev.off()
+#Rock percentage can be removed as it is after the random column
+
+```
+
+```{r}
+##Using random forest of factors influencing prey availability applied to snake data
+
+#Start from DataRF_Pred2, merged snake and model data together (MergedModelPrey). NA were removed as DNR_NA = 100m and Veg_height NA = 0cm. When 0% soil, soil type is defaulted to Gravel-allu.
+
+#Loading the merged dataset
+Merg1 <- read.csv("MergedModelPrey.csv")
+
+#Subsetting the train dataset to create a trained RF
+Train1 <- subset(Merg1, Set == "Train")
+
+#Converting everything in factor and numeric for na.roughfix
+Train1a <- mutate_if(Train1, is.character, as.factor)
+Train1b <- mutate_if(Train1a, is.integer, as.numeric)
+str(Train1b)
+
+#Create a random column to verify Gini index
+Train1b <- data.frame(Train1b %>% 
+                   mutate(random = sample(100, size = nrow(Train1b), replace = TRUE)))
+
+##Checking the best parameters for our random forest
+train(Usable ~ TimeS + Month + Rock_per + Soil_per + Vegetation_per + 
+                  Soil_type + DNR + DNV + Concealment + Vegetation_height, 
+                  data = Train1b, method = "rf", na.action = na.omit)
+#The best model is set with a mtry of 25. Remove the random column as we know it is good.
+
+#Doing the random forest model
+RFtrain1 <- randomForest(Usable ~ TimeS + Month + Rock_per + Soil_per + Vegetation_per +  
+                        Soil_type + DNR + DNV + Concealment + Vegetation_height, 
+                        data = Train1b, importance = TRUE, na.action=na.roughfix, mtry = 10, type = 1)
+RFtrain1
+importance(RFtrain1, type=1)
+
+#Plot of mean decrease accuracy 
+pdf(file="RFTrainPrey.pdf")
+varImpPlot(RFtrain1)
+dev.off()
+
+#Predicting if snake would get detected or not
+Snake <- Merg1
+
+#Converting everything in factor and numeric for na.roughfix
+Snake1a <- mutate_if(Snake, is.character, as.factor)
+Snake1b <- mutate_if(Snake1a, is.integer, as.numeric)
+str(Snake1b)
+str(Train1b)
+
+#Predicting with probabilities
+Predic1 <- predict(RFtrain1, Snake1b, type = "prob")
+Predic1
+Predic1 <- as.data.frame(Predic1)
+
+#Merging the predictions together
+PredicDF1 <- data.frame(cbind(Snake1b, Predic1))
+PredicSnakePrey <- subset(PredicDF1, Set =="Test" )
+
+#Saving the dataframe with predictions
+write.csv(PredicSnakePrey,"C:/Users/ocean/OneDrive - University of Texas at El Paso/Desktop/El Paso PhD/C_atrox_PROJECT/Experiment/Game camera/Data_31AUG23/PredicSnakePrey17JAN.csv")
+```
+
+```{r}
+#Looking at the predictions for the prey availability random forest model
+
+PredicSnakePrey <- read.csv("PredicSnakePrey17JAN.csv")
+
+#Isolating predictions for snakes
+PS <- as.data.frame(dplyr::select(PredicSnakePrey, Y, N))
+#Putting the data frame in wide format
+PSw <- gather(PS, Usable, probability, Y:N,  factor_key=TRUE)
+
+#Analysis to see difference between groups
+shapiro.test(PSw$probability)
+wilcox.test(PSw$probability ~ PSw$Usable, alternative = "two.sided", paired = TRUE)
+tapply(PSw$probability, PSw$Usable, mean)
+#The probability for prey availability is smaller where they are.
+```
+
+```{r}
+# Investigate the main factors of prey events: Using GLMM with beta family distribution and 
+# a logit link
+PredicSnakePrey$TimeS <- as.factor(PredicSnakePrey$TimeS)
+
+GlmBeta2 <- glmmTMB(Y ~  Vegetation_height + Vegetation_per + DNR + DNV + TimeS + Concealment + Month 
+                    + Soil_type + (1|ID),
+                    family = beta_family(),
+                    data = PredicSnakePrey)
+summary(GlmBeta2)
+
+#Checking which model is better
+step(GlmBeta2 , direction = "backward")
+
+#Better model without vegetation height, soil type, and concealment percentage
+GlmBeta2_b <- glmmTMB(Y ~ Vegetation_per + DNR + DNV + TimeS  + Month 
+                    +  (1|ID),
+                    family = beta_family(),
+                    data = PredicSnakePrey)
+
+summary(GlmBeta2_b)
+
+
+#Check Residual Diagnostics with DHARMa
+
+# Simulate residuals
+sim_res2 <- simulateResiduals(fittedModel = GlmBeta2_b)
+plot(sim_res2)
+
+#Check overdipsersion
+testDispersion(sim_res2)
+#Dispersion is fine (p = 0.584)
+
+#Check for Zero-One Inflation
+testZeroInflation(sim_res2)
+#No problem (p over 0.05)
+
+#Check multicollinearity
+check_collinearity(GlmBeta2)
+#No problem (VIF less than 5). Other MH percentage were removed because directly correlated to each other (%soil and %rock)
+
+#Using sjPlot to visualize results
+tab_model(GlmBeta2_b, show.re.var = TRUE)
+
+###############Post-hoc comparisons######################################################
+
+#For concealment
+emmeans(GlmBeta2, pairwise ~ Concealment, adjust = "tukey")
+
+
+#For month
+emmeans(GlmBeta2_b, pairwise ~ Month, adjust = "tukey")
+cld(emmeans(GlmBeta2_b, ~ Month), Letters = letters)
+
+#For time: 
+emmeans(GlmBeta2, pairwise ~ TimeS, adjust = "tukey")
+cld(emmeans(GlmBeta2, ~ TimeS), Letters = letters)
+plot(ggpredict(GlmBeta2, terms = "TimeS"))
+
+plot(ggpredict(GlmBeta2, terms = "Vegetation_per"))
+
+
+#####################################Figures#######################################################################################################
+#For vegetation percentage: Follow a binomial distribution with logit link
+ggplot(PredicSnakePrey,aes(Vegetation_per, Y)) +
+  geom_point(alpha = 0.3, color = "bisque4") +
+  geom_smooth(method = "glm", method.args = list(family = binomial(link = "logit")), se = TRUE) +
+          theme(legend.position="none",  plot.title = element_blank(),axis.title.x = element_blank()) +
+          theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+          panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+          theme(text = element_text(size = 15)) 
+
+ggsave("VegPerBinPrey.pdf")
+
+
+
+
+
+```
+
+
+```{r}
+#Coefficient of overlap: See supp. results and figure 2 and 3
+overlap <- read.csv("overlap.csv")
+overlap <- mutate(overlap, DateTime = paste(Date, Time2)) 
+overlap <- overlap[c("DateTime", "Scientific_name", "type")]
+overlap <- overlap %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+overlap$time <- (hour(overlap$DateTime)*60 + minute(overlap$DateTime))/(24*60)
+overlap$radtime <- overlap$time * 2 * pi
+
+#Activity for atrox
+atrox <- overlap[overlap$Scientific_name == "Crotalus atrox",]$radtime
+atrox2 <- as.numeric(na.omit(atrox))
+densityPlot(atrox2, rug=TRUE, main = "atrox activity")
+
+#Activity for coyote
+coyote <- overlap[overlap$Scientific_name == "Canis latrans",]$radtime
+densityPlot(coyote, rug=TRUE, main = "coyote activity")
+overlapPlot(coyote, atrox2, main="coyote & atrox Activity")
+overlapEst(coyote, atrox2, type="Dhat4")
+x1 <- circular(atrox2, units = "radians", template = "clock24")
+x2 <- circular(coyote, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#Peccaries
+pec <- overlap[overlap$Scientific_name == "Pecari tajacu",]$radtime
+overlapPlot(pec, atrox2, main="coyote & peccari Activity")
+overlapEst(pec, atrox2, type="Dhat4")
+x3 <- circular(pec, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+#Roadrunners
+rd <- overlap[overlap$Scientific_name == "Geococcyx californianus",]$radtime
+overlapPlot(rd, atrox2, main="coyote & rd Activity")
+overlapEst(rd, atrox2, type="Dhat4")
+x4 <- circular(rd, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x4))
+
+#########################################################################################################
+#prey vs predators
+pred <- overlap[overlap$type == "predator",]$radtime
+prey <- overlap[overlap$type == "prey",]$radtime
+
+overlapPlot(pred, atrox2, main="atrox & pred Activity")
+overlapPlot(prey, atrox2, main="atrox & prey Activity")
+
+overlapEst(pred, atrox2, type="Dhat4")
+overlapEst(prey, atrox2, type="Dhat4")
+
+#Stats
+x1 <- circular(atrox2, units = "radians", template = "clock24")
+x2 <- circular(prey, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#######################################################################################################
+#Bird vs rodents
+Oprey <- read.csv("OverlapPrey.csv")
+Oprey <- mutate(Oprey, DateTime = paste(Date, Time2)) 
+Oprey <- Oprey[c("DateTime", "Scientific_name", "type")]
+Oprey <- Oprey %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+Oprey$time <- (hour(Oprey$DateTime)*60 + minute(Oprey$DateTime))/(24*60)
+Oprey$radtime <- Oprey$time * 2 * pi
+
+#Activity for atrox
+atrox <- Oprey[Oprey$Scientific_name == "Crotalus atrox",]$radtime
+atrox<- as.numeric(na.omit(atrox))
+densityPlot(atrox, rug=TRUE, main = "atrox activity")
+
+#Rodents
+rod <- Oprey[Oprey$type == "rodent",]$radtime
+overlapPlot(rod, atrox, main="rodent & atrox Activity")
+overlapEst(rod, atrox, type="Dhat4")
+x1 <- circular(atrox, units = "radians", template = "clock24")
+x2 <- circular(rod, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#birds
+bi <- Oprey[Oprey$type == "bird",]$radtime
+overlapPlot(bi, atrox, main="rodent & atrox Activity")
+overlapEst(bi, atrox, type="Dhat4")
+x3 <- circular(bi, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+#Per seasons
+#Spring
+#bird
+oS <- read.csv("overlappreyspring.csv")
+oS<- mutate(oS, DateTime = paste(Date, Time2)) 
+oS<- oS[c("DateTime", "Scientific_name", "type")]
+oS <- oS %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+oS$time <- (hour(oS$DateTime)*60 + minute(oS$DateTime))/(24*60)
+oS$radtime <- oS$time * 2 * pi
+
+#Activity for atrox
+atrox <- oS[oS$Scientific_name == "Crotalus atrox",]$radtime
+atroxS <- as.numeric(na.omit(atrox))
+densityPlot(atroxS, rug=TRUE, main = "atrox activity")
+
+#bird
+bi <- oS[oS$type == "bird",]$radtime
+overlapPlot(bi, atroxS, main="bird & atrox Activity")
+overlapEst(bi, atroxS, type="Dhat4")
+x1 <- circular(atroxS, units = "radians", template = "clock24")
+x2 <- circular(bi, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#rodent
+ro <- oS[oS$type == "rodent",]$radtime
+overlapPlot(ro, atroxS, main="rodent & atrox Activity")
+overlapEst(ro, atroxS, type="Dhat4")
+x3 <- circular(ro, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+#############################################################################################################
+#Summer
+oSu <- read.csv("opreysummer.csv")
+oSu<- mutate(oSu, DateTime = paste(Date, Time2)) 
+oSu<- oSu[c("DateTime", "Scientific_name", "type")]
+oSu <- oSu %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+oSu$time <- (hour(oSu$DateTime)*60 + minute(oSu$DateTime))/(24*60)
+oSu$radtime <- oSu$time * 2 * pi
+
+#Activity for atrox
+atroxSu1 <- oSu[oSu$Scientific_name == "Crotalus atrox",]$radtime
+atroxSu2 <- as.numeric(na.omit(atroxSu1))
+densityPlot(atroxSu2, rug=TRUE, main = "atrox activity")
+
+#bird
+bi <- oSu[oSu$type == "bird",]$radtime
+overlapPlot(bi, atroxSu2, main="bird & atrox Activity")
+overlapEst(bi, atroxSu2, type="Dhat4")
+x1 <- circular(atroxSu2, units = "radians", template = "clock24")
+x2 <- circular(bi, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#rodent
+ro <- oSu[oSu$type == "rodent",]$radtime
+overlapPlot(ro, atroxSu2, main="rodent & atrox Activity")
+overlapEst(ro, atroxSu2, type="Dhat4")
+x3 <- circular(ro, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+
+#######################################################################################################
+#Fall
+oF <- read.csv("overlappreyfall.csv")
+oF<- mutate(oF, DateTime = paste(Date, Time2)) 
+oF<- oF[c("DateTime", "Scientific_name", "type")]
+oF <- oF %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+oF$time <- (hour(oF$DateTime)*60 + minute(oF$DateTime))/(24*60)
+oF$radtime <- oF$time * 2 * pi
+
+#Activity for atrox
+atroxF1 <- oF[oF$Scientific_name == "Crotalus atrox",]$radtime
+atroxF2 <- as.numeric(na.omit(atroxF1))
+densityPlot(atroxF2, rug=TRUE, main = "atrox activity")
+
+#bird
+bi <- oF[oF$type == "bird",]$radtime
+overlapPlot(bi, atroxF2, main="bird & atrox Activity")
+overlapEst(bi, atroxF2, type="Dhat4")
+x1 <- circular(atroxF2, units = "radians", template = "clock24")
+x2 <- circular(bi, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#rodent
+ro <- oF[oF$type == "rodent",]$radtime
+overlapPlot(ro, atroxF2, main="rodent & atrox Activity")
+overlapEst(ro, atroxF2, type="Dhat4")
+x3 <- circular(ro, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+########################################################################################################
+#Overlap per seasons: Spring
+oS <- read.csv("overlapSpring.csv")
+oS<- mutate(oS, DateTime = paste(Date, Time2)) 
+oS<- oS[c("DateTime", "Scientific_name", "type")]
+oS <- oS %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+oS$time <- (hour(oS$DateTime)*60 + minute(oS$DateTime))/(24*60)
+oS$radtime <- oS$time * 2 * pi
+
+#Activity for atrox
+atrox <- oS[oS$Scientific_name == "Crotalus atrox",]$radtime
+atroxS <- as.numeric(na.omit(atrox))
+densityPlot(atroxS, rug=TRUE, main = "atrox activity")
+
+#Activity for predators
+predS <- oS[oS$type == "predator",]$radtime
+overlapPlot(predS, atroxS, main="atrox & pred Activity")
+overlapEst(predS, atroxS, type="Dhat1")
+
+#Stats
+x1 <- circular(atroxS, units = "radians", template = "clock24")
+x2 <- circular(predS, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#Coyote
+co <- oS[oS$Scientific_name == "Canis latrans",]$radtime
+overlapEst(co, atroxS, type="Dhat1")
+x3 <- circular(co, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+#Peccary
+pe <- oS[oS$Scientific_name == "Pecari tajacu",]$radtime
+overlapEst(pe, atroxS, type="Dhat1")
+x4 <- circular(pe, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x4))
+
+#roadrunner
+ro <- oS[oS$Scientific_name == "Geococcyx californianus",]$radtime
+overlapEst(pe, atroxS, type="Dhat1")
+x4 <- circular(pe, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x4))
+
+#Activity for prey
+preyS <- oS[oS$type == "prey",]$radtime
+overlapPlot(preyS, atroxS, main="atrox & prey Activity")
+overlapEst(preyS, atroxS, type="Dhat4")
+
+#Stats
+x1 <- circular(atroxS, units = "radians", template = "clock24")
+x2 <- circular(preyS, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+
+
+#########################################################################################################
+#Overlap per seasons: Summer
+oSu <- read.csv("overlapSummer.csv")
+oSu<- mutate(oSu, DateTime = paste(Date, Time2)) 
+oSu<- oSu[c("DateTime", "Scientific_name", "type")]
+oSu <- oSu %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+oSu$time <- (hour(oSu$DateTime)*60 + minute(oSu$DateTime))/(24*60)
+oSu$radtime <- oSu$time * 2 * pi
+
+#Activity for atrox
+atroxSu1 <- oSu[oSu$Scientific_name == "Crotalus atrox",]$radtime
+atroxSu2 <- as.numeric(na.omit(atroxSu1))
+densityPlot(atroxSu2, rug=TRUE, main = "atrox activity")
+
+#Activity for predators
+predSu <- oSu[oSu$type == "predator",]$radtime
+overlapPlot(predSu, atroxSu2, main="atrox & pred Activity")
+overlapEst(predSu, atroxSu2, type="Dhat1")
+
+#Stats
+x1 <- circular(atroxSu2, units = "radians", template = "clock24")
+x2 <- circular(predSu, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#Coyote
+co <- oSu[oSu$Scientific_name == "Canis latrans",]$radtime
+overlapEst(co, atroxSu2, type="Dhat1")
+x3 <- circular(co, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+#Peccary
+pe <- oSu[oSu$Scientific_name == "Pecari tajacu",]$radtime
+overlapEst(pe, atroxSu2, type="Dhat4")
+x4 <- circular(pe, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x4))
+
+#roadrunner
+ro <- oSu[oSu$Scientific_name == "Geococcyx californianus",]$radtime
+overlapEst(ro, atroxSu2, type="Dhat1")
+x5 <- circular(ro, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x5))
+
+#Activity for prey
+preySu <- oSu[oSu$type == "prey",]$radtime
+overlapPlot(preySu, atroxSu2, main="atrox & prey Activity")
+overlapEst(predSu, atroxSu2, type="Dhat4")
+
+#Stats
+x1 <- circular(atroxSu2, units = "radians", template = "clock24")
+x2 <- circular(preySu, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#########################################################################################################
+#Overlap per seasons: Fall
+oF <- read.csv("overlapfall.csv")
+oF<- mutate(oF, DateTime = paste(Date, Time2)) 
+oF<- oF[c("DateTime", "Scientific_name", "type")]
+oF <- oF %>% mutate(DateTime = mdy_hms(DateTime))
+
+#Convert time in radian
+oF$time <- (hour(oF$DateTime)*60 + minute(oF$DateTime))/(24*60)
+oF$radtime <- oF$time * 2 * pi
+
+#Activity for atrox
+atroxF1 <- oF[oF$Scientific_name == "Crotalus atrox",]$radtime
+atroxF2 <- as.numeric(na.omit(atroxF1))
+densityPlot(atroxF2, rug=TRUE, main = "atrox activity")
+
+#Activity for predators
+predF <- oF[oF$type == "predator",]$radtime
+overlapPlot(predF, atroxF2, main="atrox & pred Activity")
+overlapEst(predF, atroxF2, type="Dhat4")
+densityPlot(atroxF2, rug=TRUE, main = "atrox activity")
+
+#Stats
+x1<- circular(atroxF2, units = "radians", template = "clock24")
+x2<- circular(predF, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+
+#Coyote
+co <- oF[oF$Scientific_name == "Canis latrans",]$radtime
+overlapEst(co, atroxF2, type="Dhat4")
+x3 <- circular(co, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x3))
+
+#Peccary
+pe <- oF[oF$Scientific_name == "Pecari tajacu",]$radtime
+overlapEst(pe, atroxF2, type="Dhat4")
+x4 <- circular(pe, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x4))
+
+#roadrunner
+ro <- oF[oF$Scientific_name == "Geococcyx californianus",]$radtime
+overlapEst(ro, atroxF2, type="Dhat1")
+x5 <- circular(ro, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x5))
+
+#Activity for preys
+preyF <- oF[oF$type == "prey",]$radtime
+overlapPlot(preyF, atroxF2, main="atrox & prey Activity")
+overlapEst(preyF, atroxF2, type="Dhat4")
+densityPlot(atroxF2, rug=TRUE, main = "atrox activity")
+
+#Stats
+x1<- circular(atroxF2, units = "radians", template = "clock24")
+x2<- circular(preyF, units = "radians", template = "clock24")
+watson.wheeler.test(list(x1,x2))
+```
+
+```{r}
+#Fig 4: Comparison of behavior probabilities
+
+Beh2 <- read.csv("Beh_Proba_all.csv")
+Beh3 <- subset(Beh2, Beh2 == c("Moving", "TC", "Burrow"))
+
+RainBeh <- ggplot(Beh3, aes(x= Beh2, y=Proba, fill=Type, color= Type, alpha =0)) + 
+  ggdist::stat_halfeye(adjust = .8, width = .7, .width = 0, justification = -.2, point_colour = NA, 
+                       position = position_dodge(0.9)) + 
+  geom_boxplot(width = .2, outlier.shape = NA, position = position_dodge(0.9)) + 
+  gghalves::geom_half_point(side = "l", range_scale = .4, alpha = .2, position = position_dodge(0.9)) +
+  scale_fill_manual (values=c("palegreen4", "bisque4")) +
+  scale_color_manual(values=c("palegreen4", "bisque4")) +
+  theme(legend.position="none",  plot.title = element_blank(),axis.title.x = element_blank(),
+        axis.title.y = element_blank()) +
+   theme(panel.grid.major = element_blank(), panel.grid.minor = element_blank(),
+  panel.background = element_blank(), axis.line = element_line(colour = "black")) +
+  theme(text = element_text(size = 15)) 
+RainBeh
+ggsave("Beh3.pdf", width = 7, height = 5)
+
+####################################################################################################################################################
+
+#Testing the significance between groups
+
+#Subsetting tight coiled data
+TC <- subset(Beh2, Beh2 == "TC")
+
+
+ks.test(TC$Proba, "pbeta", shape1 = fit$estimate[1], shape2 = fit$estimate[2])
+shapiro.test(TC$Proba)
+#The data do not follow a normal distribution and also do not follow a beta distribution
+
+#We thus choose to use a paired Wilcox
+
+wilcox.test(TC$Proba~TC$Type, paired = TRUE, alternative = "two.sided")
+
+
+```
+
+```{r}
+#For a rattlesnake life
+Beh2 <- read.csv("Beh_Proba_all.csv")
+Beh3 <- subset(Beh2, Beh2 == c("Moving", "TC"))
+
+Prey <- subset(Beh3, Type == "Prey")
+Pred <- subset(Beh3, Type == "Pred")
+
+#Number of relocations
+loc <- Prey %>%
+  group_by(Individual_ID) %>%
+  summarise(count_values = n()) 
+
+mean(loc$count_values)
+
+#Prey encounter
+Prey_count <- Prey %>%
+  group_by(Individual_ID) %>%              # Group by IndividualID
+  summarise(count_above_0.5 = sum(Proba > 0.5))   # Count occurrences where Proba > 0.5
+
+mean(Prey_count$count_above_0.5)
+
+#Predator detection
+Pred_count <- Pred %>%
+  group_by(Individual_ID) %>%              # Group by IndividualID
+  summarise(count_above_0.5 = sum(Proba > 0.5))   # Count occurrences where Proba > 0.5
+
+mean(Pred_count$count_above_0.5)
+
+
+# Summarize counts where Proba > 0.5 for prey and predator
+df_count <- Beh2 %>%
+  group_by(Beh2, Type) %>%
+  summarise(count_above_0.5 = sum(Proba > 0.5)) %>%
+  ungroup()
+
+# Create the histogram using ggplot2
+ggplot(df_count, aes(x = factor(Individual_ID), y = count_above_0.5, fill = Type)) +
+  geom_bar(stat = "identity", position = "dodge") +
+  labs(x = "Individual ID", y = "Count of Proba > 0.5", fill = "Type") +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 45, hjust = 1))
+
+#What did rattlesnakes actually do? 
+Beh2a <- subset(Beh2, Type == "Prey")
+
+Beh2a %>% count(Beh2 == "Moving")
+
+
+```
+
+
+
